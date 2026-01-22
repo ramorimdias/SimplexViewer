@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo, ChangeEvent } from 'react'
+import { useState, useMemo, ChangeEvent, useEffect } from 'react'
 import dynamic from 'next/dynamic'
 import type { PlotParams } from 'react-plotly.js'
 import Papa from 'papaparse'
@@ -16,13 +16,21 @@ interface DataRow {
   [key: string]: any
 }
 
+type PlotConfig = {
+  componentCols: string[]
+  performanceCol: string
+  colorScale: string
+  cmin: string
+  cmax: string
+  sortOrder: 'high' | 'low'
+  filterRanges: Record<string, { min: number; max: number }>
+}
+
 export default function HomePage() {
   // Raw parsed CSV data as an array of objects keyed by column names
   const [data, setData] = useState<DataRow[]>([])
   // List of column names present in the CSV
   const [columns, setColumns] = useState<string[]>([])
-  // Number of components (3 for ternary, 4 for tetrahedral)
-  const [dimension, setDimension] = useState(3)
   // Selected columns for each component (up to 4 entries). Use empty string for unselected entries
   const [componentCols, setComponentCols] = useState<string[]>(['', '', '', ''])
   // Selected performance/response column
@@ -32,6 +40,13 @@ export default function HomePage() {
   // Optional user-specified color scale min and max values. If blank string, min/max will be auto-calculated
   const [cmin, setCmin] = useState<string>('')
   const [cmax, setCmax] = useState<string>('')
+  // Sort order for plot rendering (high performance on top or low performance on top)
+  const [sortOrder, setSortOrder] = useState<'high' | 'low'>('high')
+  // Range filters for non-plotted component columns
+  const [filterRanges, setFilterRanges] = useState<
+    Record<string, { min: number; max: number }>
+  >({})
+  const [plotConfig, setPlotConfig] = useState<PlotConfig | null>(null)
 
   /**
    * Handles file input changes. Parses the selected CSV using PapaParse and updates
@@ -52,14 +67,14 @@ export default function HomePage() {
         // Reset selections when a new file is loaded
         setComponentCols(['', '', '', ''])
         setPerformanceCol('')
+        setPlotConfig(null)
       },
     })
   }
 
   /**
-   * Updates which column is selected for a given component index. When users
-   * choose the number of components (dimension), the extra fields remain in the
-   * array but are unused. Passing an empty string deselects that component.
+   * Updates which column is selected for a given component index.
+   * Passing an empty string deselects that component.
    */
   const updateComponentCol = (index: number, value: string) => {
     setComponentCols((prev) => {
@@ -69,25 +84,84 @@ export default function HomePage() {
     })
   }
 
+  const columnStats = useMemo(() => {
+    const stats: Record<string, { min: number; max: number }> = {}
+    columns.forEach((col) => {
+      let min = Number.POSITIVE_INFINITY
+      let max = Number.NEGATIVE_INFINITY
+      data.forEach((row) => {
+        const value = row[col]
+        const num = typeof value === 'number' ? value : parseFloat(value)
+        if (isFinite(num)) {
+          min = Math.min(min, num)
+          max = Math.max(max, num)
+        }
+      })
+      if (min !== Number.POSITIVE_INFINITY && max !== Number.NEGATIVE_INFINITY) {
+        stats[col] = { min, max }
+      }
+    })
+    return stats
+  }, [columns, data])
+
+  const extraColumns = useMemo(() => {
+    const selected = new Set([
+      ...componentCols.filter(Boolean),
+      performanceCol,
+    ])
+    return columns.filter((col) => !selected.has(col))
+  }, [columns, componentCols, performanceCol])
+
+  useEffect(() => {
+    setFilterRanges((prev) => {
+      const next: Record<string, { min: number; max: number }> = {}
+      extraColumns.forEach((col) => {
+        const stats = columnStats[col]
+        if (!stats) return
+        const existing = prev[col]
+        next[col] = existing
+          ? {
+              min: Math.max(stats.min, existing.min),
+              max: Math.min(stats.max, existing.max),
+            }
+          : { min: stats.min, max: stats.max }
+      })
+      return next
+    })
+  }, [extraColumns, columnStats])
+
+  const handleCreatePlot = () => {
+    setPlotConfig({
+      componentCols: [...componentCols],
+      performanceCol,
+      colorScale,
+      cmin,
+      cmax,
+      sortOrder,
+      filterRanges: Object.fromEntries(
+        Object.entries(filterRanges).map(([key, value]) => [
+          key,
+          { min: value.min, max: value.max },
+        ]),
+      ),
+    })
+  }
+
   /**
-   * Compute the plot data and layout based on current selections. This useMemo
-   * ensures computations only run when relevant dependencies change. Handles
-   * both ternary (3-component) and tetrahedral (4-component) visualisations.
+   * Compute the plot data and layout based on the applied configuration.
+   * Rendering is triggered only after clicking "Create plot".
    */
   const { plotData, plotLayout } = useMemo(() => {
-    // Validate that data is available, dimension matches available selections,
-    // and required columns are selected
-    const selectedCompCols = componentCols.slice(0, dimension).filter((c) => c)
-    if (data.length === 0 || selectedCompCols.length !== dimension || !performanceCol) {
+    if (!plotConfig) {
+      return { plotData: null, plotLayout: null }
+    }
+    const selectedCompCols = plotConfig.componentCols.filter((c) => c)
+    if (data.length === 0 || selectedCompCols.length !== 4 || !plotConfig.performanceCol) {
       return { plotData: null, plotLayout: null }
     }
     // Extract performance values and compute overall min and max for colour scaling
     const perfValues: number[] = []
     // Data arrays for Plotly
-    const aVals: number[] = []
-    const bVals: number[] = []
-    const cVals: number[] = []
-    const dVals: number[] = []
     const xVals: number[] = []
     const yVals: number[] = []
     const zVals: number[] = []
@@ -100,10 +174,27 @@ export default function HomePage() {
     const v2 = [0.5, Math.sqrt(3) / 2, 0]
     const v3 = [0.5, Math.sqrt(3) / 6, Math.sqrt(6) / 3]
 
-    data.forEach((row, rowIndex) => {
+    const points: {
+      perf: number
+      x: number
+      y: number
+      z: number
+      hover: string
+    }[] = []
+
+    data.forEach((row) => {
+      for (const [filterCol, range] of Object.entries(
+        plotConfig.filterRanges,
+      )) {
+        const value = row[filterCol]
+        const num = typeof value === 'number' ? value : parseFloat(value)
+        if (!isFinite(num) || num < range.min || num > range.max) {
+          return
+        }
+      }
       // Extract raw component values
       const comps: number[] = []
-      for (let i = 0; i < dimension; i++) {
+      for (let i = 0; i < 4; i++) {
         const col = selectedCompCols[i]
         let val = row[col]
         // Convert strings to numbers if possible
@@ -114,7 +205,7 @@ export default function HomePage() {
         comps.push(typeof val === 'number' && isFinite(val) ? val : NaN)
       }
       // Extract performance value
-      let perf: any = row[performanceCol]
+      let perf: any = row[plotConfig.performanceCol]
       if (typeof perf === 'string') {
         const num = parseFloat(perf)
         perf = isFinite(num) ? num : NaN
@@ -129,145 +220,94 @@ export default function HomePage() {
         return
       }
       const normalized = comps.map((v) => v / sum)
-      // Store performance value
-      perfValues.push(perf)
       // Compose hover text with component proportions and performance
       const componentsText = normalized
         .map((v, idx) => `${selectedCompCols[idx]}: ${(v * 100).toFixed(2)}%`)
         .join('<br>')
-      hoverTexts.push(
-        `${componentsText}<br>${performanceCol}: ${perf.toFixed(3)}`,
-      )
-      if (dimension === 3) {
-        // For ternary plots, assign a,b,c arrays
-        aVals.push(normalized[0])
-        bVals.push(normalized[1])
-        cVals.push(normalized[2])
-      } else {
-        // Convert to 3D Cartesian coordinates for tetrahedral plot
-        const [a, b, c, d] = normalized as [number, number, number, number]
-        // Weighted sum of vertices
-        const x =
-          v0[0] * a + v1[0] * b + v2[0] * c + v3[0] * d
-        const y =
-          v0[1] * a + v1[1] * b + v2[1] * c + v3[1] * d
-        const z =
-          v0[2] * a + v1[2] * b + v2[2] * c + v3[2] * d
-        xVals.push(x)
-        yVals.push(y)
-        zVals.push(z)
-      }
+      const hoverText = `${componentsText}<br>${plotConfig.performanceCol}: ${perf.toFixed(3)}`
+      // Convert to 3D Cartesian coordinates for tetrahedral plot
+      const [a, b, c, d] = normalized as [number, number, number, number]
+      // Weighted sum of vertices
+      const x = v0[0] * a + v1[0] * b + v2[0] * c + v3[0] * d
+      const y = v0[1] * a + v1[1] * b + v2[1] * c + v3[1] * d
+      const z = v0[2] * a + v1[2] * b + v2[2] * c + v3[2] * d
+      points.push({ perf, x, y, z, hover: hoverText })
+    })
+
+    points.sort((left, right) =>
+      plotConfig.sortOrder === 'high'
+        ? left.perf - right.perf
+        : right.perf - left.perf,
+    )
+    points.forEach((point) => {
+      xVals.push(point.x)
+      yVals.push(point.y)
+      zVals.push(point.z)
+      hoverTexts.push(point.hover)
+      perfValues.push(point.perf)
     })
     // Determine colour scale min and max. Use user-provided values if present, otherwise derive from data.
     const perfMin = perfValues.length > 0 ? Math.min(...perfValues) : 0
     const perfMax = perfValues.length > 0 ? Math.max(...perfValues) : 1
-    const cminNum = cmin !== '' ? parseFloat(cmin) : perfMin
-    const cmaxNum = cmax !== '' ? parseFloat(cmax) : perfMax
+    const cminNum = plotConfig.cmin !== '' ? parseFloat(plotConfig.cmin) : perfMin
+    const cmaxNum = plotConfig.cmax !== '' ? parseFloat(plotConfig.cmax) : perfMax
     // Build Plotly trace and layout
-    if (dimension === 3) {
-      const trace: any = {
-        type: 'scatterternary',
-        mode: 'markers',
-        a: aVals,
-        b: bVals,
-        c: cVals,
-        text: hoverTexts,
-        hoverinfo: 'text',
-        marker: {
-          color: perfValues,
-          colorscale: colorScale,
-          cmin: cminNum,
-          cmax: cmaxNum,
-          size: 6,
-          showscale: true,
-          colorbar: {
-            title: performanceCol,
-            titleside: 'right',
-          },
-        },
-      }
-      const layout: any = {
-        ternary: {
-          sum: 1,
-          aaxis: {
-            title: selectedCompCols[0],
-            min: 0,
-            tickformat: '.2f',
-          },
-          baxis: {
-            title: selectedCompCols[1],
-            min: 0,
-            tickformat: '.2f',
-          },
-          caxis: {
-            title: selectedCompCols[2],
-            min: 0,
-            tickformat: '.2f',
-          },
-        },
-        margin: { l: 0, r: 0, b: 0, t: 30 },
-        height: 600,
-        title: `${selectedCompCols.join(' / ')} Simplex`,
-      }
-      return { plotData: [trace], plotLayout: layout }
-    } else {
-      // Build a mesh to visualise the tetrahedron boundaries
-      const tetraX = [v0[0], v1[0], v2[0], v3[0]]
-      const tetraY = [v0[1], v1[1], v2[1], v3[1]]
-      const tetraZ = [v0[2], v1[2], v2[2], v3[2]]
-      // Faces of the tetrahedron defined by vertex indices
-      const meshI = [0, 0, 0, 1]
-      const meshJ = [1, 1, 2, 2]
-      const meshK = [2, 3, 3, 3]
-      const meshTrace: any = {
-        type: 'mesh3d',
-        x: tetraX,
-        y: tetraY,
-        z: tetraZ,
-        i: meshI,
-        j: meshJ,
-        k: meshK,
-        opacity: 0.1,
-        color: 'lightgrey',
-        flatshading: true,
-        hoverinfo: 'skip',
-        showscale: false,
-      }
-      const scatterTrace: any = {
-        type: 'scatter3d',
-        mode: 'markers',
-        x: xVals,
-        y: yVals,
-        z: zVals,
-        text: hoverTexts,
-        hoverinfo: 'text',
-        marker: {
-          color: perfValues,
-          colorscale: colorScale,
-          cmin: cminNum,
-          cmax: cmaxNum,
-          size: 4,
-          opacity: 0.8,
-          showscale: true,
-          colorbar: {
-            title: performanceCol,
-          },
-        },
-      }
-      const layout: any = {
-        scene: {
-          xaxis: { title: 'X', showgrid: false, zeroline: false },
-          yaxis: { title: 'Y', showgrid: false, zeroline: false },
-          zaxis: { title: 'Z', showgrid: false, zeroline: false },
-          aspectmode: 'data',
-        },
-        margin: { l: 0, r: 0, b: 0, t: 30 },
-        height: 600,
-        title: `${selectedCompCols.join(' / ')} Tetrahedron`,
-      }
-      return { plotData: [meshTrace, scatterTrace], plotLayout: layout }
+    // Build a mesh to visualise the tetrahedron boundaries
+    const tetraX = [v0[0], v1[0], v2[0], v3[0]]
+    const tetraY = [v0[1], v1[1], v2[1], v3[1]]
+    const tetraZ = [v0[2], v1[2], v2[2], v3[2]]
+    // Faces of the tetrahedron defined by vertex indices
+    const meshI = [0, 0, 0, 1]
+    const meshJ = [1, 1, 2, 2]
+    const meshK = [2, 3, 3, 3]
+    const meshTrace: any = {
+      type: 'mesh3d',
+      x: tetraX,
+      y: tetraY,
+      z: tetraZ,
+      i: meshI,
+      j: meshJ,
+      k: meshK,
+      opacity: 0.1,
+      color: 'lightgrey',
+      flatshading: true,
+      hoverinfo: 'skip',
+      showscale: false,
     }
-  }, [data, dimension, componentCols, performanceCol, colorScale, cmin, cmax])
+    const scatterTrace: any = {
+      type: 'scatter3d',
+      mode: 'markers',
+      x: xVals,
+      y: yVals,
+      z: zVals,
+      text: hoverTexts,
+      hoverinfo: 'text',
+      marker: {
+        color: perfValues,
+        colorscale: plotConfig.colorScale,
+        cmin: cminNum,
+        cmax: cmaxNum,
+        size: 4,
+        opacity: 0.8,
+        showscale: true,
+        colorbar: {
+          title: plotConfig.performanceCol,
+        },
+      },
+    }
+    const layout: any = {
+      scene: {
+        xaxis: { title: 'X', showgrid: false, zeroline: false },
+        yaxis: { title: 'Y', showgrid: false, zeroline: false },
+        zaxis: { title: 'Z', showgrid: false, zeroline: false },
+        aspectmode: 'data',
+      },
+      margin: { l: 0, r: 0, b: 0, t: 30 },
+      height: 600,
+      title: `${selectedCompCols.join(' / ')} Tetrahedron`,
+    }
+    return { plotData: [meshTrace, scatterTrace], plotLayout: layout }
+  }, [data, plotConfig])
 
   // List of built-in Plotly colour scales. Users can extend this list as desired.
   const colorScales = [
@@ -294,22 +334,14 @@ export default function HomePage() {
           onChange={handleFileChange}
           className="block border p-2 rounded w-full"
         />
+        {data.length > 0 && (
+          <p className="text-sm text-gray-600">{data.length} data points loaded</p>
+        )}
       </div>
       {columns.length > 0 && (
         <div className="space-y-4">
           <div className="flex flex-wrap gap-4">
-            <div>
-              <label className="block text-sm font-medium">Number of components</label>
-              <select
-                value={dimension}
-                onChange={(e) => setDimension(parseInt(e.target.value))}
-                className="border p-2 rounded"
-              >
-                <option value={3}>3 (triangle)</option>
-                <option value={4}>4 (tetrahedron)</option>
-              </select>
-            </div>
-            {Array.from({ length: dimension }).map((_, idx) => (
+            {Array.from({ length: 4 }).map((_, idx) => (
               <div key={idx}>
                 <label className="block text-sm font-medium">
                   Component {idx + 1} column
@@ -360,6 +392,19 @@ export default function HomePage() {
               </select>
             </div>
             <div>
+              <label className="block text-sm font-medium">Draw order</label>
+              <select
+                value={sortOrder}
+                onChange={(e) =>
+                  setSortOrder(e.target.value === 'high' ? 'high' : 'low')
+                }
+                className="border p-2 rounded"
+              >
+                <option value="high">High performance on top</option>
+                <option value="low">Low performance on top</option>
+              </select>
+            </div>
+            <div>
               <label className="block text-sm font-medium">Colour min (optional)</label>
               <input
                 type="number"
@@ -380,6 +425,13 @@ export default function HomePage() {
               />
             </div>
           </div>
+          <button
+            type="button"
+            onClick={handleCreatePlot}
+            className="bg-blue-600 text-white px-4 py-2 rounded"
+          >
+            Create plot
+          </button>
         </div>
       )}
       {plotData && plotLayout && (
@@ -390,6 +442,62 @@ export default function HomePage() {
             config={{ responsive: true }}
             style={{ width: '100%', height: '100%' }}
           />
+        </div>
+      )}
+      {plotData && plotLayout && extraColumns.length > 0 && (
+        <div className="space-y-4">
+          <h2 className="text-sm font-semibold">Other component filters</h2>
+          {extraColumns.map((col) => {
+            const stats = columnStats[col]
+            const range = filterRanges[col]
+            if (!stats || !range) return null
+            return (
+              <div key={col} className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">{col}</span>
+                  <span className="text-xs text-gray-600">
+                    {range.min.toFixed(3)} - {range.max.toFixed(3)}
+                  </span>
+                </div>
+                <div className="flex flex-col gap-2">
+                  <input
+                    type="range"
+                    min={stats.min}
+                    max={stats.max}
+                    step="any"
+                    value={range.min}
+                    onChange={(e) => {
+                      const value = parseFloat(e.target.value)
+                      setFilterRanges((prev) => ({
+                        ...prev,
+                        [col]: {
+                          min: Math.min(value, prev[col].max),
+                          max: prev[col].max,
+                        },
+                      }))
+                    }}
+                  />
+                  <input
+                    type="range"
+                    min={stats.min}
+                    max={stats.max}
+                    step="any"
+                    value={range.max}
+                    onChange={(e) => {
+                      const value = parseFloat(e.target.value)
+                      setFilterRanges((prev) => ({
+                        ...prev,
+                        [col]: {
+                          min: prev[col].min,
+                          max: Math.max(value, prev[col].min),
+                        },
+                      }))
+                    }}
+                  />
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
     </div>

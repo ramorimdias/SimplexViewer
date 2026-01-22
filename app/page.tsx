@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo, ChangeEvent } from 'react'
+import { useState, ChangeEvent } from 'react'
 import dynamic from 'next/dynamic'
 import type { PlotParams } from 'react-plotly.js'
 import Papa from 'papaparse'
@@ -21,9 +21,9 @@ export default function HomePage() {
   const [data, setData] = useState<DataRow[]>([])
   // List of column names present in the CSV
   const [columns, setColumns] = useState<string[]>([])
-  // Number of components (3 for ternary, 4 for tetrahedral)
+  // Number of components (N for an (N-1)-simplex)
   const [dimension, setDimension] = useState(3)
-  // Selected columns for each component (up to 4 entries). Use empty string for unselected entries
+  // Selected columns for each component. Use empty string for unselected entries
   const [componentCols, setComponentCols] = useState<string[]>(['', '', '', ''])
   // Selected performance/response column
   const [performanceCol, setPerformanceCol] = useState('')
@@ -32,6 +32,8 @@ export default function HomePage() {
   // Optional user-specified color scale min and max values. If blank string, min/max will be auto-calculated
   const [cmin, setCmin] = useState<string>('')
   const [cmax, setCmax] = useState<string>('')
+  const [plotData, setPlotData] = useState<PlotParams['data'] | null>(null)
+  const [plotLayout, setPlotLayout] = useState<PlotParams['layout'] | null>(null)
 
   /**
    * Handles file input changes. Parses the selected CSV using PapaParse and updates
@@ -52,6 +54,8 @@ export default function HomePage() {
         // Reset selections when a new file is loaded
         setComponentCols(['', '', '', ''])
         setPerformanceCol('')
+        setPlotData(null)
+        setPlotLayout(null)
       },
     })
   }
@@ -70,16 +74,18 @@ export default function HomePage() {
   }
 
   /**
-   * Compute the plot data and layout based on current selections. This useMemo
-   * ensures computations only run when relevant dependencies change. Handles
-   * both ternary (3-component) and tetrahedral (4-component) visualisations.
+   * Build the plot data and layout based on current selections. Handles
+   * ternary (3-component), tetrahedral (4-component), and higher-dimensional
+   * simplex projections.
    */
-  const { plotData, plotLayout } = useMemo(() => {
+  const buildPlot = () => {
     // Validate that data is available, dimension matches available selections,
     // and required columns are selected
     const selectedCompCols = componentCols.slice(0, dimension).filter((c) => c)
     if (data.length === 0 || selectedCompCols.length !== dimension || !performanceCol) {
-      return { plotData: null, plotLayout: null }
+      setPlotData(null)
+      setPlotLayout(null)
+      return
     }
     // Extract performance values and compute overall min and max for colour scaling
     const perfValues: number[] = []
@@ -91,6 +97,7 @@ export default function HomePage() {
     const xVals: number[] = []
     const yVals: number[] = []
     const zVals: number[] = []
+    const parCoords: number[][] = []
     const hoverTexts: string[] = []
 
     // Define tetrahedron vertices for barycentric coordinate conversion
@@ -143,7 +150,7 @@ export default function HomePage() {
         aVals.push(normalized[0])
         bVals.push(normalized[1])
         cVals.push(normalized[2])
-      } else {
+      } else if (dimension === 4) {
         // Convert to 3D Cartesian coordinates for tetrahedral plot
         const [a, b, c, d] = normalized as [number, number, number, number]
         // Weighted sum of vertices
@@ -156,6 +163,9 @@ export default function HomePage() {
         xVals.push(x)
         yVals.push(y)
         zVals.push(z)
+      } else {
+        // For N>4, keep N-1 dimensions (drop the redundant last component)
+        parCoords.push(normalized.slice(0, normalized.length - 1))
       }
     })
     // Determine colour scale min and max. Use user-provided values if present, otherwise derive from data.
@@ -209,8 +219,11 @@ export default function HomePage() {
         height: 600,
         title: `${selectedCompCols.join(' / ')} Simplex`,
       }
-      return { plotData: [trace], plotLayout: layout }
-    } else {
+      setPlotData([trace])
+      setPlotLayout(layout)
+      return
+    }
+    if (dimension === 4) {
       // Build a mesh to visualise the tetrahedron boundaries
       const tetraX = [v0[0], v1[0], v2[0], v3[0]]
       const tetraY = [v0[1], v1[1], v2[1], v3[1]]
@@ -265,9 +278,35 @@ export default function HomePage() {
         height: 600,
         title: `${selectedCompCols.join(' / ')} Tetrahedron`,
       }
-      return { plotData: [meshTrace, scatterTrace], plotLayout: layout }
+      setPlotData([meshTrace, scatterTrace])
+      setPlotLayout(layout)
+      return
     }
-  }, [data, dimension, componentCols, performanceCol, colorScale, cmin, cmax])
+    const axes = selectedCompCols.slice(0, -1).map((label, idx) => ({
+      label,
+      range: [0, 1],
+      values: parCoords.map((row) => row[idx]),
+    }))
+    const trace: any = {
+      type: 'parcoords',
+      line: {
+        color: perfValues,
+        colorscale: colorScale,
+        cmin: cminNum,
+        cmax: cmaxNum,
+        showscale: true,
+        colorbar: { title: performanceCol },
+      },
+      dimensions: axes,
+    }
+    const layout: any = {
+      margin: { l: 40, r: 40, b: 20, t: 30 },
+      height: 600,
+      title: `${selectedCompCols.join(' / ')} Simplex (N-1 dimensions)`,
+    }
+    setPlotData([trace])
+    setPlotLayout(layout)
+  }
 
   // List of built-in Plotly colour scales. Users can extend this list as desired.
   const colorScales = [
@@ -297,16 +336,40 @@ export default function HomePage() {
       </div>
       {columns.length > 0 && (
         <div className="space-y-4">
+          <div className="text-sm text-slate-600">
+            Imported data points: <span className="font-semibold">{data.length}</span>
+          </div>
           <div className="flex flex-wrap gap-4">
             <div>
               <label className="block text-sm font-medium">Number of components</label>
               <select
                 value={dimension}
-                onChange={(e) => setDimension(parseInt(e.target.value))}
+                onChange={(e) => {
+                  const next = parseInt(e.target.value)
+                  setDimension(next)
+                  setComponentCols((prev) => {
+                    const padded = [...prev]
+                    while (padded.length < next) {
+                      padded.push('')
+                    }
+                    return padded
+                  })
+                }}
                 className="border p-2 rounded"
               >
-                <option value={3}>3 (triangle)</option>
-                <option value={4}>4 (tetrahedron)</option>
+                {Array.from({ length: Math.max(columns.length - 2, 1) }).map(
+                  (_, idx) => {
+                    const value = idx + 3
+                    if (value > columns.length) {
+                      return null
+                    }
+                    return (
+                      <option key={value} value={value}>
+                        {value} components
+                      </option>
+                    )
+                  },
+                )}
               </select>
             </div>
             {Array.from({ length: dimension }).map((_, idx) => (
@@ -379,6 +442,15 @@ export default function HomePage() {
                 className="border p-2 rounded w-32"
               />
             </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              onClick={buildPlot}
+              className="rounded bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700"
+            >
+              Create plot
+            </button>
           </div>
         </div>
       )}

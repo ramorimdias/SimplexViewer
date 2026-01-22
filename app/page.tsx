@@ -23,6 +23,8 @@ export default function HomePage() {
   const [columns, setColumns] = useState<string[]>([])
   // Selected columns for each component (up to 4 entries). Use empty string for unselected entries
   const [componentCols, setComponentCols] = useState<string[]>(['', '', '', ''])
+  // Selected columns that participate in the mass-balance component pool
+  const [componentPool, setComponentPool] = useState<string[]>([])
   // Selected performance/response column
   const [performanceCol, setPerformanceCol] = useState('')
   // Selected Plotly color scale
@@ -32,10 +34,9 @@ export default function HomePage() {
   const [cmax, setCmax] = useState<string>('')
   // Sort order for plot rendering (high performance on top or low performance on top)
   const [sortOrder, setSortOrder] = useState<'high' | 'low'>('high')
-  // Range filters for non-plotted component columns
-  const [filterRanges, setFilterRanges] = useState<
-    Record<string, { min: number; max: number }>
-  >({})
+  // Fixed-value filters for slider component columns
+  const [sliderColumns, setSliderColumns] = useState<string[]>([])
+  const [sliderValues, setSliderValues] = useState<Record<string, number>>({})
 
   /**
    * Handles file input changes. Parses the selected CSV using PapaParse and updates
@@ -55,6 +56,9 @@ export default function HomePage() {
         setColumns(cols)
         // Reset selections when a new file is loaded
         setComponentCols(['', '', '', ''])
+        setComponentPool([])
+        setSliderColumns([])
+        setSliderValues({})
         setPerformanceCol('')
       },
     })
@@ -72,9 +76,24 @@ export default function HomePage() {
     })
   }
 
+  useEffect(() => {
+    setComponentCols((prev) =>
+      prev.map((col) => (componentPool.includes(col) ? col : '')),
+    )
+    setSliderColumns((prev) =>
+      prev.filter((col) => componentPool.includes(col)),
+    )
+  }, [componentPool])
+
+  useEffect(() => {
+    if (!performanceCol) return
+    setComponentPool((prev) => prev.filter((col) => col !== performanceCol))
+    setSliderColumns((prev) => prev.filter((col) => col !== performanceCol))
+  }, [performanceCol])
+
   const componentColumns = useMemo(() => {
-    return columns.filter((col) => col !== performanceCol)
-  }, [columns, performanceCol])
+    return componentPool
+  }, [componentPool])
 
   const extraColumns = useMemo(() => {
     const selected = new Set(componentCols.filter(Boolean))
@@ -108,29 +127,47 @@ export default function HomePage() {
   }, [componentColumns, data])
 
   useEffect(() => {
-    setFilterRanges((prev) => {
-      const next: Record<string, { min: number; max: number }> = {}
-      extraColumns.forEach((col) => {
+    setSliderValues((prev) => {
+      const next: Record<string, number> = {}
+      sliderColumns.forEach((col) => {
         const stats = columnStats[col]
         if (!stats) return
         const existing = prev[col]
-        next[col] = existing
-          ? {
-              min: Math.max(stats.min, existing.min),
-              max: Math.min(stats.max, existing.max),
-            }
-          : { min: stats.min, max: stats.max }
+        next[col] = existing ?? (stats.min + stats.max) / 2
       })
       return next
     })
-  }, [extraColumns, columnStats])
+  }, [sliderColumns, columnStats])
+
+  const handleComponentPoolChange = (column: string, checked: boolean) => {
+    setComponentPool((prev) => {
+      const next = checked
+        ? Array.from(new Set([...prev, column]))
+        : prev.filter((item) => item !== column)
+      return next
+    })
+  }
+
+  const handleSliderColumnChange = (column: string, checked: boolean) => {
+    setSliderColumns((prev) => {
+      const next = checked
+        ? Array.from(new Set([...prev, column]))
+        : prev.filter((item) => item !== column)
+      return next
+    })
+  }
 
   /**
    * Compute the plot data and layout based on the live configuration.
    */
   const { plotData, plotLayout } = useMemo(() => {
     const selectedCompCols = componentCols.filter((c) => c)
-    if (data.length === 0 || selectedCompCols.length !== 4 || !performanceCol) {
+    if (
+      data.length === 0 ||
+      selectedCompCols.length !== 4 ||
+      !performanceCol ||
+      componentColumns.length === 0
+    ) {
       return { plotData: null, plotLayout: null }
     }
     // Extract performance values and compute overall min and max for colour scaling
@@ -156,6 +193,7 @@ export default function HomePage() {
       hover: string
     }[] = []
 
+    const tolerance = 0.005
     data.forEach((row) => {
       const total = componentColumns.reduce((sum, componentCol) => {
         const value = row[componentCol]
@@ -165,14 +203,18 @@ export default function HomePage() {
       if (total <= 0) {
         return
       }
-      for (const [filterCol, range] of Object.entries(filterRanges)) {
-        const value = row[filterCol]
+      for (const sliderCol of sliderColumns) {
+        const value = row[sliderCol]
         const num = typeof value === 'number' ? value : parseFloat(value)
         if (!isFinite(num)) {
           return
         }
         const normalized = num / total
-        if (normalized < range.min || normalized > range.max) {
+        const target = sliderValues[sliderCol]
+        if (target === undefined) {
+          return
+        }
+        if (Math.abs(normalized - target) > tolerance) {
           return
         }
       }
@@ -294,8 +336,9 @@ export default function HomePage() {
     componentCols,
     componentColumns,
     data,
-    filterRanges,
     performanceCol,
+    sliderColumns,
+    sliderValues,
     sortOrder,
   ])
 
@@ -330,6 +373,28 @@ export default function HomePage() {
       </div>
       {columns.length > 0 && (
         <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium">Component columns</label>
+            <p className="text-xs text-gray-600">
+              Select all columns that contribute to the mass-balance total.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-3">
+              {columns
+                .filter((col) => col !== performanceCol)
+                .map((col) => (
+                  <label key={col} className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={componentPool.includes(col)}
+                      onChange={(e) =>
+                        handleComponentPoolChange(col, e.target.checked)
+                      }
+                    />
+                    {col}
+                  </label>
+                ))}
+            </div>
+          </div>
           <div className="flex flex-wrap gap-4">
             {Array.from({ length: 4 }).map((_, idx) => (
               <div key={idx}>
@@ -342,7 +407,7 @@ export default function HomePage() {
                   className="border p-2 rounded"
                 >
                   <option value="">Select column</option>
-                  {columns.map((col) => (
+                  {componentColumns.map((col) => (
                     <option key={col} value={col}>
                       {col}
                     </option>
@@ -415,6 +480,26 @@ export default function HomePage() {
               />
             </div>
           </div>
+          <div>
+            <label className="block text-sm font-medium">Slider components</label>
+            <p className="text-xs text-gray-600">
+              Choose which remaining components should be controlled with sliders.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-3">
+              {extraColumns.map((col) => (
+                <label key={col} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={sliderColumns.includes(col)}
+                    onChange={(e) =>
+                      handleSliderColumnChange(col, e.target.checked)
+                    }
+                  />
+                  {col}
+                </label>
+              ))}
+            </div>
+          </div>
         </div>
       )}
       {plotData && plotLayout && (
@@ -427,19 +512,19 @@ export default function HomePage() {
           />
         </div>
       )}
-      {plotData && plotLayout && extraColumns.length > 0 && (
+      {plotData && plotLayout && sliderColumns.length > 0 && (
         <div className="space-y-4">
-          <h2 className="text-sm font-semibold">Other component filters</h2>
-          {extraColumns.map((col) => {
+          <h2 className="text-sm font-semibold">Slider components</h2>
+          {sliderColumns.map((col) => {
             const stats = columnStats[col]
-            const range = filterRanges[col]
-            if (!stats || !range) return null
+            const value = sliderValues[col]
+            if (!stats || value === undefined) return null
             return (
               <div key={col} className="space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium">{col}</span>
                   <span className="text-xs text-gray-600">
-                    {range.min.toFixed(3)} - {range.max.toFixed(3)}
+                    {value.toFixed(3)}
                   </span>
                 </div>
                 <div className="flex flex-col gap-2">
@@ -447,33 +532,13 @@ export default function HomePage() {
                     type="range"
                     min={stats.min}
                     max={stats.max}
-                    step="any"
-                    value={range.min}
+                    step={0.001}
+                    value={value}
                     onChange={(e) => {
-                      const value = parseFloat(e.target.value)
-                      setFilterRanges((prev) => ({
+                      const nextValue = parseFloat(e.target.value)
+                      setSliderValues((prev) => ({
                         ...prev,
-                        [col]: {
-                          min: Math.min(value, prev[col].max),
-                          max: prev[col].max,
-                        },
-                      }))
-                    }}
-                  />
-                  <input
-                    type="range"
-                    min={stats.min}
-                    max={stats.max}
-                    step="any"
-                    value={range.max}
-                    onChange={(e) => {
-                      const value = parseFloat(e.target.value)
-                      setFilterRanges((prev) => ({
-                        ...prev,
-                        [col]: {
-                          min: prev[col].min,
-                          max: Math.max(value, prev[col].min),
-                        },
+                        [col]: nextValue,
                       }))
                     }}
                   />

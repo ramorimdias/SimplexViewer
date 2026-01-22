@@ -16,16 +16,6 @@ interface DataRow {
   [key: string]: any
 }
 
-type PlotConfig = {
-  componentCols: string[]
-  performanceCol: string
-  colorScale: string
-  cmin: string
-  cmax: string
-  sortOrder: 'high' | 'low'
-  filterRanges: Record<string, { min: number; max: number }>
-}
-
 export default function HomePage() {
   // Raw parsed CSV data as an array of objects keyed by column names
   const [data, setData] = useState<DataRow[]>([])
@@ -46,7 +36,6 @@ export default function HomePage() {
   const [filterRanges, setFilterRanges] = useState<
     Record<string, { min: number; max: number }>
   >({})
-  const [plotConfig, setPlotConfig] = useState<PlotConfig | null>(null)
 
   /**
    * Handles file input changes. Parses the selected CSV using PapaParse and updates
@@ -67,7 +56,6 @@ export default function HomePage() {
         // Reset selections when a new file is loaded
         setComponentCols(['', '', '', ''])
         setPerformanceCol('')
-        setPlotConfig(null)
       },
     })
   }
@@ -84,33 +72,40 @@ export default function HomePage() {
     })
   }
 
+  const componentColumns = useMemo(() => {
+    return columns.filter((col) => col !== performanceCol)
+  }, [columns, performanceCol])
+
+  const extraColumns = useMemo(() => {
+    const selected = new Set(componentCols.filter(Boolean))
+    return componentColumns.filter((col) => !selected.has(col))
+  }, [componentColumns, componentCols])
+
   const columnStats = useMemo(() => {
     const stats: Record<string, { min: number; max: number }> = {}
-    columns.forEach((col) => {
+    componentColumns.forEach((col) => {
       let min = Number.POSITIVE_INFINITY
       let max = Number.NEGATIVE_INFINITY
       data.forEach((row) => {
+        const total = componentColumns.reduce((sum, componentCol) => {
+          const value = row[componentCol]
+          const num = typeof value === 'number' ? value : parseFloat(value)
+          return isFinite(num) ? sum + num : sum
+        }, 0)
+        if (total <= 0) return
         const value = row[col]
         const num = typeof value === 'number' ? value : parseFloat(value)
-        if (isFinite(num)) {
-          min = Math.min(min, num)
-          max = Math.max(max, num)
-        }
+        if (!isFinite(num)) return
+        const normalized = num / total
+        min = Math.min(min, normalized)
+        max = Math.max(max, normalized)
       })
       if (min !== Number.POSITIVE_INFINITY && max !== Number.NEGATIVE_INFINITY) {
         stats[col] = { min, max }
       }
     })
     return stats
-  }, [columns, data])
-
-  const extraColumns = useMemo(() => {
-    const selected = new Set([
-      ...componentCols.filter(Boolean),
-      performanceCol,
-    ])
-    return columns.filter((col) => !selected.has(col))
-  }, [columns, componentCols, performanceCol])
+  }, [componentColumns, data])
 
   useEffect(() => {
     setFilterRanges((prev) => {
@@ -130,33 +125,12 @@ export default function HomePage() {
     })
   }, [extraColumns, columnStats])
 
-  const handleCreatePlot = () => {
-    setPlotConfig({
-      componentCols: [...componentCols],
-      performanceCol,
-      colorScale,
-      cmin,
-      cmax,
-      sortOrder,
-      filterRanges: Object.fromEntries(
-        Object.entries(filterRanges).map(([key, value]) => [
-          key,
-          { min: value.min, max: value.max },
-        ]),
-      ),
-    })
-  }
-
   /**
-   * Compute the plot data and layout based on the applied configuration.
-   * Rendering is triggered only after clicking "Create plot".
+   * Compute the plot data and layout based on the live configuration.
    */
   const { plotData, plotLayout } = useMemo(() => {
-    if (!plotConfig) {
-      return { plotData: null, plotLayout: null }
-    }
-    const selectedCompCols = plotConfig.componentCols.filter((c) => c)
-    if (data.length === 0 || selectedCompCols.length !== 4 || !plotConfig.performanceCol) {
+    const selectedCompCols = componentCols.filter((c) => c)
+    if (data.length === 0 || selectedCompCols.length !== 4 || !performanceCol) {
       return { plotData: null, plotLayout: null }
     }
     // Extract performance values and compute overall min and max for colour scaling
@@ -183,12 +157,22 @@ export default function HomePage() {
     }[] = []
 
     data.forEach((row) => {
-      for (const [filterCol, range] of Object.entries(
-        plotConfig.filterRanges,
-      )) {
+      const total = componentColumns.reduce((sum, componentCol) => {
+        const value = row[componentCol]
+        const num = typeof value === 'number' ? value : parseFloat(value)
+        return isFinite(num) ? sum + num : sum
+      }, 0)
+      if (total <= 0) {
+        return
+      }
+      for (const [filterCol, range] of Object.entries(filterRanges)) {
         const value = row[filterCol]
         const num = typeof value === 'number' ? value : parseFloat(value)
-        if (!isFinite(num) || num < range.min || num > range.max) {
+        if (!isFinite(num)) {
+          return
+        }
+        const normalized = num / total
+        if (normalized < range.min || normalized > range.max) {
           return
         }
       }
@@ -205,7 +189,7 @@ export default function HomePage() {
         comps.push(typeof val === 'number' && isFinite(val) ? val : NaN)
       }
       // Extract performance value
-      let perf: any = row[plotConfig.performanceCol]
+      let perf: any = row[performanceCol]
       if (typeof perf === 'string') {
         const num = parseFloat(perf)
         perf = isFinite(num) ? num : NaN
@@ -215,16 +199,12 @@ export default function HomePage() {
         return
       }
       // Compute normalised barycentric coordinates by dividing by the sum
-      const sum = comps.reduce((acc, cur) => acc + cur, 0)
-      if (sum <= 0) {
-        return
-      }
-      const normalized = comps.map((v) => v / sum)
+      const normalized = comps.map((v) => v / total)
       // Compose hover text with component proportions and performance
       const componentsText = normalized
         .map((v, idx) => `${selectedCompCols[idx]}: ${(v * 100).toFixed(2)}%`)
         .join('<br>')
-      const hoverText = `${componentsText}<br>${plotConfig.performanceCol}: ${perf.toFixed(3)}`
+      const hoverText = `${componentsText}<br>${performanceCol}: ${perf.toFixed(3)}`
       // Convert to 3D Cartesian coordinates for tetrahedral plot
       const [a, b, c, d] = normalized as [number, number, number, number]
       // Weighted sum of vertices
@@ -235,7 +215,7 @@ export default function HomePage() {
     })
 
     points.sort((left, right) =>
-      plotConfig.sortOrder === 'high'
+      sortOrder === 'high'
         ? left.perf - right.perf
         : right.perf - left.perf,
     )
@@ -249,8 +229,8 @@ export default function HomePage() {
     // Determine colour scale min and max. Use user-provided values if present, otherwise derive from data.
     const perfMin = perfValues.length > 0 ? Math.min(...perfValues) : 0
     const perfMax = perfValues.length > 0 ? Math.max(...perfValues) : 1
-    const cminNum = plotConfig.cmin !== '' ? parseFloat(plotConfig.cmin) : perfMin
-    const cmaxNum = plotConfig.cmax !== '' ? parseFloat(plotConfig.cmax) : perfMax
+    const cminNum = cmin !== '' ? parseFloat(cmin) : perfMin
+    const cmaxNum = cmax !== '' ? parseFloat(cmax) : perfMax
     // Build Plotly trace and layout
     // Build a mesh to visualise the tetrahedron boundaries
     const tetraX = [v0[0], v1[0], v2[0], v3[0]]
@@ -284,14 +264,14 @@ export default function HomePage() {
       hoverinfo: 'text',
       marker: {
         color: perfValues,
-        colorscale: plotConfig.colorScale,
+        colorscale: colorScale,
         cmin: cminNum,
         cmax: cmaxNum,
         size: 4,
         opacity: 0.8,
         showscale: true,
         colorbar: {
-          title: plotConfig.performanceCol,
+          title: performanceCol,
         },
       },
     }
@@ -307,7 +287,17 @@ export default function HomePage() {
       title: `${selectedCompCols.join(' / ')} Tetrahedron`,
     }
     return { plotData: [meshTrace, scatterTrace], plotLayout: layout }
-  }, [data, plotConfig])
+  }, [
+    cmax,
+    cmin,
+    colorScale,
+    componentCols,
+    componentColumns,
+    data,
+    filterRanges,
+    performanceCol,
+    sortOrder,
+  ])
 
   // List of built-in Plotly colour scales. Users can extend this list as desired.
   const colorScales = [
@@ -425,13 +415,6 @@ export default function HomePage() {
               />
             </div>
           </div>
-          <button
-            type="button"
-            onClick={handleCreatePlot}
-            className="bg-blue-600 text-white px-4 py-2 rounded"
-          >
-            Create plot
-          </button>
         </div>
       )}
       {plotData && plotLayout && (

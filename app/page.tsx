@@ -37,6 +37,7 @@ export default function HomePage() {
   // Fixed-value filters for slider component columns
   const [sliderColumns, setSliderColumns] = useState<string[]>([])
   const [sliderValues, setSliderValues] = useState<Record<string, number>>({})
+  const [sliderMargins, setSliderMargins] = useState<Record<string, number>>({})
 
   /**
    * Handles file input changes. Parses the selected CSV using PapaParse and updates
@@ -59,6 +60,7 @@ export default function HomePage() {
         setComponentPool([])
         setSliderColumns([])
         setSliderValues({})
+        setSliderMargins({})
         setPerformanceCol('')
       },
     })
@@ -89,6 +91,11 @@ export default function HomePage() {
     if (!performanceCol) return
     setComponentPool((prev) => prev.filter((col) => col !== performanceCol))
     setSliderColumns((prev) => prev.filter((col) => col !== performanceCol))
+    setSliderMargins((prev) => {
+      const next = { ...prev }
+      delete next[performanceCol]
+      return next
+    })
   }, [performanceCol])
 
   const componentColumns = useMemo(() => {
@@ -137,6 +144,14 @@ export default function HomePage() {
       })
       return next
     })
+    setSliderMargins((prev) => {
+      const next: Record<string, number> = {}
+      sliderColumns.forEach((col) => {
+        const existing = prev[col]
+        next[col] = existing ?? 0.01
+      })
+      return next
+    })
   }, [sliderColumns, columnStats])
 
   const handleComponentPoolChange = (column: string, checked: boolean) => {
@@ -155,7 +170,44 @@ export default function HomePage() {
         : prev.filter((item) => item !== column)
       return next
     })
+    setSliderMargins((prev) => {
+      if (checked) {
+        return { ...prev, [column]: prev[column] ?? 0.01 }
+      }
+      const next = { ...prev }
+      delete next[column]
+      return next
+    })
   }
+
+  const massBalanceAlert = useMemo(() => {
+    if (data.length === 0 || componentColumns.length === 0) {
+      return null
+    }
+    const tolerance = 0.01
+    let checked = 0
+    let outOfBalance = 0
+    data.forEach((row) => {
+      const total = componentColumns.reduce((sum, componentCol) => {
+        const value = row[componentCol]
+        const num = typeof value === 'number' ? value : parseFloat(value)
+        return isFinite(num) ? sum + num : sum
+      }, 0)
+      if (!isFinite(total) || total <= 0) {
+        checked += 1
+        outOfBalance += 1
+        return
+      }
+      checked += 1
+      if (Math.abs(total - 1) > tolerance) {
+        outOfBalance += 1
+      }
+    })
+    if (outOfBalance === 0) {
+      return null
+    }
+    return { outOfBalance, checked, tolerance }
+  }, [componentColumns, data])
 
   /**
    * Compute the plot data and layout based on the live configuration.
@@ -193,7 +245,6 @@ export default function HomePage() {
       hover: string
     }[] = []
 
-    const tolerance = 0.005
     data.forEach((row) => {
       const total = componentColumns.reduce((sum, componentCol) => {
         const value = row[componentCol]
@@ -214,7 +265,8 @@ export default function HomePage() {
         if (target === undefined) {
           return
         }
-        if (Math.abs(normalized - target) > tolerance) {
+        const margin = Math.max(0, sliderMargins[sliderCol] ?? 0)
+        if (Math.abs(normalized - target) > margin) {
           return
         }
       }
@@ -324,6 +376,7 @@ export default function HomePage() {
         zaxis: { title: 'Z', showgrid: false, zeroline: false },
         aspectmode: 'data',
       },
+      uirevision: 'keep',
       margin: { l: 0, r: 0, b: 0, t: 30 },
       height: 600,
       title: `${selectedCompCols.join(' / ')} Tetrahedron`,
@@ -338,6 +391,7 @@ export default function HomePage() {
     data,
     performanceCol,
     sliderColumns,
+    sliderMargins,
     sliderValues,
     sortOrder,
   ])
@@ -378,6 +432,14 @@ export default function HomePage() {
             <p className="text-xs text-gray-600">
               Select all columns that contribute to the mass-balance total.
             </p>
+            {massBalanceAlert && (
+              <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
+                Mass balance warning: {massBalanceAlert.outOfBalance} of{' '}
+                {massBalanceAlert.checked} rows do not sum to 1 (±
+                {massBalanceAlert.tolerance.toFixed(2)}) for the selected
+                components.
+              </div>
+            )}
             <div className="mt-2 flex flex-wrap gap-3">
               {columns
                 .filter((col) => col !== performanceCol)
@@ -518,13 +580,14 @@ export default function HomePage() {
           {sliderColumns.map((col) => {
             const stats = columnStats[col]
             const value = sliderValues[col]
+            const margin = sliderMargins[col] ?? 0
             if (!stats || value === undefined) return null
             return (
               <div key={col} className="space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium">{col}</span>
                   <span className="text-xs text-gray-600">
-                    {value.toFixed(3)}
+                    {value.toFixed(3)} ± {margin.toFixed(3)}
                   </span>
                 </div>
                 <div className="flex flex-col gap-2">
@@ -542,6 +605,23 @@ export default function HomePage() {
                       }))
                     }}
                   />
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    Margin
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.001}
+                      value={margin}
+                      onChange={(e) => {
+                        const nextValue = parseFloat(e.target.value)
+                        setSliderMargins((prev) => ({
+                          ...prev,
+                          [col]: isFinite(nextValue) ? nextValue : 0,
+                        }))
+                      }}
+                      className="w-24 rounded border p-1 text-xs"
+                    />
+                  </label>
                 </div>
               </div>
             )

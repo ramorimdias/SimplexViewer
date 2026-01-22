@@ -2,11 +2,15 @@
 
 import { useState, useMemo, ChangeEvent } from 'react'
 import dynamic from 'next/dynamic'
+import type { PlotParams } from 'react-plotly.js'
 import Papa from 'papaparse'
 
 // Dynamically import Plotly component to avoid SSR issues
 // When using dynamic import with a CommonJS module we need to access the default export.
-const Plot = dynamic(() => import('react-plotly.js').then((mod) => mod.default), { ssr: false })
+const Plot = dynamic<PlotParams>(
+  () => import('react-plotly.js').then((mod) => mod.default),
+  { ssr: false },
+)
 
 interface DataRow {
   [key: string]: any

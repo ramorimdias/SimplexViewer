@@ -17,9 +17,9 @@ export default function HomePage() {
   const [data, setData] = useState<DataRow[]>([])
   // List of column names present in the CSV
   const [columns, setColumns] = useState<string[]>([])
-  // Number of components (3 for ternary, 4 for tetrahedral)
+  // Number of components (3 for ternary, 4 for tetrahedral, 5+ for N-1D)
   const [dimension, setDimension] = useState(3)
-  // Selected columns for each component (up to 4 entries). Use empty string for unselected entries
+  // Selected columns for each component. Use empty string for unselected entries
   const [componentCols, setComponentCols] = useState<string[]>(['', '', '', ''])
   // Selected performance/response column
   const [performanceCol, setPerformanceCol] = useState('')
@@ -28,6 +28,15 @@ export default function HomePage() {
   // Optional user-specified color scale min and max values. If blank string, min/max will be auto-calculated
   const [cmin, setCmin] = useState<string>('')
   const [cmax, setCmax] = useState<string>('')
+  // Snapshot of parameters used to generate the current plot (set when clicking "Create plot")
+  const [plotParams, setPlotParams] = useState<{
+    dimension: number
+    componentCols: string[]
+    performanceCol: string
+    colorScale: string
+    cmin: string
+    cmax: string
+  } | null>(null)
 
   /**
    * Handles file input changes. Parses the selected CSV using PapaParse and updates
@@ -46,8 +55,9 @@ export default function HomePage() {
         setData(parsedData)
         setColumns(cols)
         // Reset selections when a new file is loaded
-        setComponentCols(['', '', '', ''])
+        setComponentCols(Array.from({ length: cols.length }, () => ''))
         setPerformanceCol('')
+        setPlotParams(null)
       },
     })
   }
@@ -68,13 +78,26 @@ export default function HomePage() {
   /**
    * Compute the plot data and layout based on current selections. This useMemo
    * ensures computations only run when relevant dependencies change. Handles
-   * both ternary (3-component) and tetrahedral (4-component) visualisations.
+   * both ternary (3-component), tetrahedral (4-component), and N-1D visualisations.
    */
   const { plotData, plotLayout } = useMemo(() => {
+    if (!plotParams) {
+      return { plotData: null, plotLayout: null }
+    }
+    const {
+      dimension: plotDimension,
+      componentCols: plotComponentCols,
+      performanceCol: plotPerformanceCol,
+      colorScale: plotColorScale,
+      cmin: plotCmin,
+      cmax: plotCmax,
+    } = plotParams
     // Validate that data is available, dimension matches available selections,
     // and required columns are selected
-    const selectedCompCols = componentCols.slice(0, dimension).filter((c) => c)
-    if (data.length === 0 || selectedCompCols.length !== dimension || !performanceCol) {
+    const selectedCompCols = plotComponentCols
+      .slice(0, plotDimension)
+      .filter((c) => c)
+    if (data.length === 0 || selectedCompCols.length !== plotDimension || !plotPerformanceCol) {
       return { plotData: null, plotLayout: null }
     }
     // Extract performance values and compute overall min and max for colour scaling
@@ -83,7 +106,6 @@ export default function HomePage() {
     const aVals: number[] = []
     const bVals: number[] = []
     const cVals: number[] = []
-    const dVals: number[] = []
     const xVals: number[] = []
     const yVals: number[] = []
     const zVals: number[] = []
@@ -96,10 +118,10 @@ export default function HomePage() {
     const v2 = [0.5, Math.sqrt(3) / 2, 0]
     const v3 = [0.5, Math.sqrt(3) / 6, Math.sqrt(6) / 3]
 
-    data.forEach((row, rowIndex) => {
+    data.forEach((row) => {
       // Extract raw component values
       const comps: number[] = []
-      for (let i = 0; i < dimension; i++) {
+      for (let i = 0; i < plotDimension; i++) {
         const col = selectedCompCols[i]
         let val = row[col]
         // Convert strings to numbers if possible
@@ -110,7 +132,7 @@ export default function HomePage() {
         comps.push(typeof val === 'number' && isFinite(val) ? val : NaN)
       }
       // Extract performance value
-      let perf: any = row[performanceCol]
+      let perf: any = row[plotPerformanceCol]
       if (typeof perf === 'string') {
         const num = parseFloat(perf)
         perf = isFinite(num) ? num : NaN
@@ -132,14 +154,14 @@ export default function HomePage() {
         .map((v, idx) => `${selectedCompCols[idx]}: ${(v * 100).toFixed(2)}%`)
         .join('<br>')
       hoverTexts.push(
-        `${componentsText}<br>${performanceCol}: ${perf.toFixed(3)}`,
+        `${componentsText}<br>${plotPerformanceCol}: ${perf.toFixed(3)}`,
       )
-      if (dimension === 3) {
+      if (plotDimension === 3) {
         // For ternary plots, assign a,b,c arrays
         aVals.push(normalized[0])
         bVals.push(normalized[1])
         cVals.push(normalized[2])
-      } else {
+      } else if (plotDimension === 4) {
         // Convert to 3D Cartesian coordinates for tetrahedral plot
         const [a, b, c, d] = normalized as [number, number, number, number]
         // Weighted sum of vertices
@@ -157,10 +179,10 @@ export default function HomePage() {
     // Determine colour scale min and max. Use user-provided values if present, otherwise derive from data.
     const perfMin = perfValues.length > 0 ? Math.min(...perfValues) : 0
     const perfMax = perfValues.length > 0 ? Math.max(...perfValues) : 1
-    const cminNum = cmin !== '' ? parseFloat(cmin) : perfMin
-    const cmaxNum = cmax !== '' ? parseFloat(cmax) : perfMax
+    const cminNum = plotCmin !== '' ? parseFloat(plotCmin) : perfMin
+    const cmaxNum = plotCmax !== '' ? parseFloat(plotCmax) : perfMax
     // Build Plotly trace and layout
-    if (dimension === 3) {
+    if (plotDimension === 3) {
       const trace: any = {
         type: 'scatterternary',
         mode: 'markers',
@@ -171,13 +193,13 @@ export default function HomePage() {
         hoverinfo: 'text',
         marker: {
           color: perfValues,
-          colorscale: colorScale,
+          colorscale: plotColorScale,
           cmin: cminNum,
           cmax: cmaxNum,
           size: 6,
           showscale: true,
           colorbar: {
-            title: performanceCol,
+            title: plotPerformanceCol,
             titleside: 'right',
           },
         },
@@ -206,7 +228,8 @@ export default function HomePage() {
         title: `${selectedCompCols.join(' / ')} Simplex`,
       }
       return { plotData: [trace], plotLayout: layout }
-    } else {
+    }
+    if (plotDimension === 4) {
       // Build a mesh to visualise the tetrahedron boundaries
       const tetraX = [v0[0], v1[0], v2[0], v3[0]]
       const tetraY = [v0[1], v1[1], v2[1], v3[1]]
@@ -239,14 +262,14 @@ export default function HomePage() {
         hoverinfo: 'text',
         marker: {
           color: perfValues,
-          colorscale: colorScale,
+          colorscale: plotColorScale,
           cmin: cminNum,
           cmax: cmaxNum,
           size: 4,
           opacity: 0.8,
           showscale: true,
           colorbar: {
-            title: performanceCol,
+            title: plotPerformanceCol,
           },
         },
       }
@@ -263,7 +286,64 @@ export default function HomePage() {
       }
       return { plotData: [meshTrace, scatterTrace], plotLayout: layout }
     }
-  }, [data, dimension, componentCols, performanceCol, colorScale, cmin, cmax])
+
+    const axisValues = Array.from({ length: plotDimension - 1 }, () => [] as number[])
+    data.forEach((row) => {
+      const comps: number[] = []
+      for (let i = 0; i < plotDimension; i++) {
+        const col = selectedCompCols[i]
+        let val = row[col]
+        if (typeof val === 'string') {
+          const num = parseFloat(val)
+          val = isFinite(num) ? num : NaN
+        }
+        comps.push(typeof val === 'number' && isFinite(val) ? val : NaN)
+      }
+      let perf: any = row[plotPerformanceCol]
+      if (typeof perf === 'string') {
+        const num = parseFloat(perf)
+        perf = isFinite(num) ? num : NaN
+      }
+      if (comps.some((v) => !isFinite(v)) || !isFinite(perf)) {
+        return
+      }
+      const sum = comps.reduce((acc, cur) => acc + cur, 0)
+      if (sum <= 0) {
+        return
+      }
+      const normalized = comps.map((v) => v / sum)
+      for (let i = 0; i < plotDimension - 1; i++) {
+        axisValues[i].push(normalized[i])
+      }
+    })
+
+    const dimensions = selectedCompCols.slice(0, plotDimension - 1).map((label, idx) => ({
+      label,
+      values: axisValues[idx],
+      range: [0, 1],
+    }))
+
+    const trace: any = {
+      type: 'parcoords',
+      dimensions,
+      line: {
+        color: perfValues,
+        colorscale: plotColorScale,
+        cmin: cminNum,
+        cmax: cmaxNum,
+        showscale: true,
+        colorbar: {
+          title: plotPerformanceCol,
+        },
+      },
+    }
+    const layout: any = {
+      margin: { l: 40, r: 40, b: 20, t: 40 },
+      height: 600,
+      title: `${selectedCompCols.join(' / ')} Simplex (${plotDimension - 1}D)`,
+    }
+    return { plotData: [trace], plotLayout: layout }
+  }, [data, plotParams])
 
   // List of built-in Plotly colour scales. Users can extend this list as desired.
   const colorScales = [
@@ -279,6 +359,11 @@ export default function HomePage() {
     'Electric',
     'Rainbow',
   ]
+  const maxComponents = Math.max(3, columns.length)
+  const canPlot =
+    data.length > 0 &&
+    componentCols.slice(0, dimension).filter(Boolean).length === dimension &&
+    Boolean(performanceCol)
 
   return (
     <div className="space-y-6">
@@ -290,6 +375,11 @@ export default function HomePage() {
           onChange={handleFileChange}
           className="block border p-2 rounded w-full"
         />
+        {data.length > 0 && (
+          <p className="text-sm text-gray-600">
+            Imported data points: {data.length}
+          </p>
+        )}
       </div>
       {columns.length > 0 && (
         <div className="space-y-4">
@@ -301,8 +391,20 @@ export default function HomePage() {
                 onChange={(e) => setDimension(parseInt(e.target.value))}
                 className="border p-2 rounded"
               >
-                <option value={3}>3 (triangle)</option>
-                <option value={4}>4 (tetrahedron)</option>
+                {Array.from({ length: maxComponents - 2 }, (_, idx) => {
+                  const value = idx + 3
+                  const label =
+                    value === 3
+                      ? '3 (triangle)'
+                      : value === 4
+                        ? '4 (tetrahedron)'
+                        : `${value}`
+                  return (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  )
+                })}
               </select>
             </div>
             {Array.from({ length: dimension }).map((_, idx) => (
@@ -375,6 +477,30 @@ export default function HomePage() {
                 className="border p-2 rounded w-32"
               />
             </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <button
+              type="button"
+              onClick={() =>
+                setPlotParams({
+                  dimension,
+                  componentCols,
+                  performanceCol,
+                  colorScale,
+                  cmin,
+                  cmax,
+                })
+              }
+              disabled={!canPlot}
+              className="rounded bg-blue-600 px-4 py-2 text-white disabled:cursor-not-allowed disabled:bg-blue-300"
+            >
+              Create plot
+            </button>
+            {dimension > 4 && (
+              <p className="text-sm text-gray-600">
+                Showing the first {dimension - 1} dimensions (N-1) of the simplex.
+              </p>
+            )}
           </div>
         </div>
       )}
